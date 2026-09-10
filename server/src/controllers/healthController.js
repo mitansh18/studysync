@@ -1,3 +1,5 @@
+const { getDbStatus } = require("../config/db");
+
 const SERVICE_NAME = "StudySync API";
 
 function getApiRoot(req, res) {
@@ -15,4 +17,15 @@ function getHealth(req, res) {
   });
 }
 
-module.exports = { getApiRoot, getHealth };
+// Development health check: reports live MongoDB connection state.
+function getDbHealth(req, res) {
+  const database = getDbStatus();
+  const connected = database === "connected";
+
+  res.status(connected ? 200 : 503).json({
+    status: connected ? "ok" : "error",
+    database,
+  });
+}
+
+module.exports = { getApiRoot, getHealth, getDbHealth };

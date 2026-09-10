@@ -1,10 +1,32 @@
-// Load env vars before requiring the app, which reads them at import time.
+// Load env vars before requiring anything that reads them at import time.
 require("dotenv").config();
 
 const app = require("./app");
+const { connectDB } = require("./config/db");
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`StudySync server running on http://localhost:${PORT}`);
-});
+async function start() {
+  // No insecure fallback: an unsigned-secret server is worse than no server.
+  if (!process.env.JWT_SECRET) {
+    console.error(
+      "Startup failed: missing JWT_SECRET. Copy server/.env.example to server/.env and set it."
+    );
+    process.exit(1);
+  }
+
+  try {
+    await connectDB();
+  } catch (error) {
+    // The database is required, so fail loudly instead of serving requests
+    // against a database that is not there.
+    console.error("MongoDB connection failed:", error.message);
+    process.exit(1);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`StudySync server running on http://localhost:${PORT}`);
+  });
+}
+
+start();
