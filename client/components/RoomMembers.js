@@ -4,6 +4,18 @@ import { useEffect, useRef, useState } from "react";
 
 import { supabase, supabaseConfigError } from "@/lib/supabase";
 
+// SECURITY NOTE - presence is ephemeral, untrusted UI state.
+//
+// Presence is gated only by the app's MongoDB membership check below: a
+// normal app user who is not a member of this room never subscribes, so
+// they cannot appear through the app. That gate is not enforcement.
+// Supabase Realtime Authorization is NOT configured, and the anon key is
+// public by design, so anyone holding it could connect to a room channel
+// directly and broadcast the userId of an existing member, making that
+// member show as Online. Do not treat presence as a security or
+// authorization signal. Proper Realtime Authorization is deferred to a
+// later stage.
+
 // One channel per room, so presence in Room 1 is never visible in Room 2.
 function channelName(roomId) {
   return `studysync-room-${roomId}`;
@@ -42,8 +54,8 @@ export default function RoomMembers({ room, currentUserId }) {
   const isMember = room.members.some((member) => member.id === currentUserId);
 
   useEffect(() => {
-    // Presence is only for authenticated members of this room. A non-member
-    // never joins the channel, so they never broadcast presence.
+    // App-level gate: the app only subscribes members. This is a UI
+    // courtesy, not enforcement - see the security note at the top.
     if (!supabase || !isMember) {
       return undefined;
     }
