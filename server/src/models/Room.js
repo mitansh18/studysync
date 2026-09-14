@@ -103,6 +103,16 @@ const roomSchema = new mongoose.Schema(
       type: timerStateSchema,
       default: () => ({}),
     },
+    // Bumped by $inc in the same atomic update as every timer write, so it
+    // orders timer states exactly as MongoDB committed them. Clients keep
+    // the highest version they have applied and drop anything not newer,
+    // which is what makes out-of-order realtime delivery harmless. Kept
+    // outside timerState so the timer's own shape is unchanged.
+    timerVersion: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
   // Supplies createdAt (and updatedAt), matching the User model.
   { timestamps: true }

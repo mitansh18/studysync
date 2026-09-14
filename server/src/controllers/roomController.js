@@ -31,6 +31,7 @@ function toRoomResponse(room) {
       startedAt: room.timerState.startedAt,
       durationSeconds: room.timerState.durationSeconds,
     },
+    timerVersion: room.timerVersion,
     createdAt: room.createdAt,
   };
 }
@@ -177,9 +178,11 @@ function swapTimerState(roomId, userId, expectedTimer, nextTimerState) {
     filter[`timerState.${field}`] = value;
   }
 
+  // The version bump rides in the same single update as the state change,
+  // so there is never a moment where one has happened without the other.
   return Room.findOneAndUpdate(
     filter,
-    { $set: { timerState: nextTimerState } },
+    { $set: { timerState: nextTimerState }, $inc: { timerVersion: 1 } },
     { returnDocument: "after", runValidators: true }
   ).populate("members", "name");
 }
@@ -192,7 +195,7 @@ function swapTimerState(roomId, userId, expectedTimer, nextTimerState) {
 async function sendTimerResult(res, message, room) {
   const payload = toRoomResponse(room);
 
-  await broadcastTimerUpdate(payload.id, payload.timerState);
+  await broadcastTimerUpdate(payload.id, payload.timerState, payload.timerVersion);
 
   return res.status(200).json({ message, room: payload });
 }

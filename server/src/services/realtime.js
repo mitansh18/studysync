@@ -40,10 +40,11 @@ function roomChannelName(roomId) {
   return `studysync-room-${roomId}`;
 }
 
-// Sends the canonical timer state to everyone subscribed to the room's
-// channel as a "timer" broadcast. Resolves true if Supabase accepted the
-// message, false otherwise. Never throws.
-async function broadcastTimerUpdate(roomId, timerState) {
+// Sends the canonical timer state, with the version MongoDB assigned to it,
+// to everyone subscribed to the room's channel as a "timer" broadcast.
+// Resolves true if Supabase accepted the message, false otherwise. Never
+// throws.
+async function broadcastTimerUpdate(roomId, timerState, timerVersion) {
   if (realtimeConfigError) {
     return false;
   }
@@ -60,7 +61,7 @@ async function broadcastTimerUpdate(roomId, timerState) {
           {
             topic: roomChannelName(roomId),
             event: "timer",
-            payload: { timerState },
+            payload: { timerState, timerVersion },
           },
         ],
       }),

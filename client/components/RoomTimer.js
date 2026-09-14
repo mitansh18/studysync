@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/context/AuthContext";
 import { apiFetch } from "@/lib/api";
-import { formatTime, getRemainingSeconds } from "@/lib/timer";
+import { formatTime, getRemainingSeconds, isTimerState } from "@/lib/timer";
 
 const STATUS_LABEL = { idle: "Idle", running: "Running", paused: "Paused" };
 
@@ -21,10 +21,24 @@ const buttonClass =
 // Shows the room's shared timer and sends Start / Pause / Reset to the API.
 // The component never decides what the timer state should become: every
 // change comes back from the server (in the action response or, for other
-// members, over the room channel) and is handed up through onRoomUpdate.
-export default function RoomTimer({ roomId, timerState, canControl, onRoomUpdate }) {
+// members, over the room channel). Responses are handed up through the
+// page's beginRoomUpdate/applyRoomUpdate pair so one that was overtaken by
+// a newer broadcast, or belongs to a room no longer shown, is dropped.
+export default function RoomTimer({
+  roomId,
+  timerState,
+  canControl,
+  beginRoomUpdate,
+  applyRoomUpdate,
+}) {
   const { refreshUser } = useAuth();
   const router = useRouter();
+
+  // The server's schema and serializer make an invalid timer state
+  // impossible, so this should never be false. If it ever is, the timer
+  // says so and disables itself rather than inventing a state or taking the
+  // whole room page down with it.
+  const valid = isTimerState(timerState);
 
   // The one clock reading the countdown is derived from. Only a running
   // timer needs it refreshed, so the interval below exists only then.
@@ -35,7 +49,7 @@ export default function RoomTimer({ roomId, timerState, canControl, onRoomUpdate
   // Same lesson as the forms: state is not a synchronous mutex, this ref is.
   const inFlight = useRef(false);
 
-  const running = timerState.status === "running";
+  const running = valid && timerState.status === "running";
 
   useEffect(() => {
     if (!running) {
@@ -66,6 +80,10 @@ export default function RoomTimer({ roomId, timerState, canControl, onRoomUpdate
     setPendingAction(name);
     setError(null);
 
+    // Taken before the request so a broadcast that lands while it is in
+    // flight makes the response stale.
+    const seen = beginRoomUpdate();
+
     let result;
     try {
       // No body: the server owns status, startedAt and durationSeconds.
@@ -82,7 +100,7 @@ export default function RoomTimer({ roomId, timerState, canControl, onRoomUpdate
 
     if (ok) {
       // data.room is the canonical room after the write, timerState included.
-      onRoomUpdate(data.room);
+      applyRoomUpdate(data.room, seen);
       return;
     }
 
@@ -100,11 +118,28 @@ export default function RoomTimer({ roomId, timerState, canControl, onRoomUpdate
     // or someone else changed the timer first). Re-read the room so what is
     // shown matches what the server has.
     if (status === 409) {
+      const seenBeforeRefetch = beginRoomUpdate();
       const fresh = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`);
       if (fresh.ok) {
-        onRoomUpdate(fresh.data.room);
+        applyRoomUpdate(fresh.data.room, seenBeforeRefetch);
       }
     }
+  }
+
+  if (!valid) {
+    return (
+      <div
+        className="mt-6 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800"
+        data-testid="room-timer"
+      >
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">
+          Pomodoro Timer
+        </h2>
+        <p className="mt-3 text-sm text-red-600" role="alert" data-testid="timer-unavailable">
+          Timer state unavailable. Reload the room to try again.
+        </p>
+      </div>
+    );
   }
 
   const remaining = getRemainingSeconds(timerState, now);
