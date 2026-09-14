@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import RoomMembers from "@/components/RoomMembers";
+import RoomTimer from "@/components/RoomTimer";
 import { useAuth } from "@/context/AuthContext";
 import { apiFetch } from "@/lib/api";
+import { isTimerState } from "@/lib/timer";
 
 const GENERIC_FAILURE = "Unable to load this room. Please try again.";
 
@@ -19,6 +21,11 @@ export default function RoomPage() {
   const [room, setRoom] = useState(null);
   const [roomError, setRoomError] = useState(null);
   const [loadingRoom, setLoadingRoom] = useState(true);
+
+  // Counts applied timer broadcasts. A re-sync fetch is only applied if this
+  // has not moved while it was in flight - a broadcast that arrived in the
+  // meantime is newer than whatever the fetch read.
+  const broadcastCount = useRef(0);
 
   // Same guard as the dashboard: only redirect once the session check has
   // finished, and never when the auth server was simply unreachable.
@@ -61,6 +68,41 @@ export default function RoomPage() {
       cancelled = true;
     };
   }, [loading, user, roomId, refreshUser, router]);
+
+  // A timer broadcast carries only the timer, so it is merged into the room
+  // already held here; the same `room` state is what the initial fetch and
+  // every successful timer action (a full room) write to. Anything that is
+  // not a well-formed timer state is ignored rather than displayed.
+  const handleTimerBroadcast = useCallback((payload) => {
+    const next = payload ? payload.timerState : null;
+
+    if (!isTimerState(next)) {
+      return;
+    }
+
+    broadcastCount.current += 1;
+    setRoom((current) => (current ? { ...current, timerState: next } : current));
+  }, []);
+
+  // Late-joiner boundary. The first fetch happens before the room channel
+  // exists, so a timer change between that read and the channel becoming
+  // SUBSCRIBED would be in neither. RoomMembers calls this once the channel
+  // is live (and again after any reconnect): one more read of the canonical
+  // room, after which every later change arrives as a broadcast. Not
+  // polling - it runs only on (re)subscription.
+  const syncRoom = useCallback(async () => {
+    const seen = broadcastCount.current;
+    const result = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`);
+
+    if (result.ok && broadcastCount.current === seen) {
+      setRoom(result.data.room);
+    } else if (result.status === 401) {
+      await refreshUser();
+      router.replace("/login");
+    }
+    // Other failures are left alone: the state shown is still the last
+    // canonical one and the live channel is up.
+  }, [roomId, refreshUser, router]);
 
   if (loading) {
     return (
@@ -108,7 +150,19 @@ export default function RoomPage() {
             {room.subject}
           </p>
 
-          <RoomMembers room={room} currentUserId={user.id} />
+          <RoomTimer
+            roomId={room.id}
+            timerState={room.timerState}
+            canControl={room.members.some((member) => member.id === user.id)}
+            onRoomUpdate={setRoom}
+          />
+
+          <RoomMembers
+            room={room}
+            currentUserId={user.id}
+            onTimerUpdate={handleTimerBroadcast}
+            onSubscribed={syncRoom}
+          />
         </>
       ) : null}
 

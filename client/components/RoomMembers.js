@@ -46,10 +46,29 @@ const STATUS_LABEL = {
   CLOSED: "Presence disconnected",
 };
 
-export default function RoomMembers({ room, currentUserId }) {
+// This component owns the one channel a client holds per room, because
+// presence needs it. Timer broadcasts arrive on that same channel, so they
+// are relayed to the page through onTimerUpdate rather than opening a second
+// subscription. supabase.channel() returns the existing instance for a
+// topic that is already open, so a second subscriber would collide anyway.
+export default function RoomMembers({
+  room,
+  currentUserId,
+  onTimerUpdate,
+  onSubscribed,
+}) {
   const [onlineIds, setOnlineIds] = useState(() => new Set());
   const [status, setStatus] = useState("connecting");
   const channelRef = useRef(null);
+
+  // Kept in a ref so a new callback identity never re-subscribes presence;
+  // the effect below keys only on the room, user and membership.
+  const onTimerUpdateRef = useRef(onTimerUpdate);
+  const onSubscribedRef = useRef(onSubscribed);
+  useEffect(() => {
+    onTimerUpdateRef.current = onTimerUpdate;
+    onSubscribedRef.current = onSubscribed;
+  }, [onTimerUpdate, onSubscribed]);
 
   const isMember = room.members.some((member) => member.id === currentUserId);
 
@@ -77,6 +96,13 @@ export default function RoomMembers({ room, currentUserId }) {
       .on("presence", { event: "leave" }, () => {
         setOnlineIds(toOnlineIds(channel.presenceState()));
       })
+      // Sent by the server after every successful timer write (Stage 2.4).
+      // Presence events above never touch the timer, and vice versa.
+      .on("broadcast", { event: "timer" }, ({ payload }) => {
+        if (onTimerUpdateRef.current) {
+          onTimerUpdateRef.current(payload);
+        }
+      })
       .subscribe((nextStatus) => {
         setStatus(nextStatus);
 
@@ -84,6 +110,12 @@ export default function RoomMembers({ room, currentUserId }) {
           // Only the id is broadcast. Names are read from the room's member
           // list, so nothing sensitive crosses the realtime connection.
           channel.track({ userId: currentUserId });
+
+          // Fires on the first join and on every automatic rejoin, so the
+          // page can close the gap between its fetch and live delivery.
+          if (onSubscribedRef.current) {
+            onSubscribedRef.current();
+          }
         }
       });
 
