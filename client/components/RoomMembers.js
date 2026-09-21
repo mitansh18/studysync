@@ -47,14 +47,16 @@ const STATUS_LABEL = {
 };
 
 // This component owns the one channel a client holds per room, because
-// presence needs it. Timer broadcasts arrive on that same channel, so they
-// are relayed to the page through onTimerUpdate rather than opening a second
-// subscription. supabase.channel() returns the existing instance for a
-// topic that is already open, so a second subscriber would collide anyway.
+// presence needs it. Timer and notes broadcasts arrive on that same
+// channel, so they are relayed to the page through onTimerUpdate and
+// onNotesUpdate rather than opening a second subscription.
+// supabase.channel() returns the existing instance for a topic that is
+// already open, so a second subscriber would collide anyway.
 export default function RoomMembers({
   room,
   currentUserId,
   onTimerUpdate,
+  onNotesUpdate,
   onSubscribed,
 }) {
   const [onlineIds, setOnlineIds] = useState(() => new Set());
@@ -64,11 +66,13 @@ export default function RoomMembers({
   // Kept in a ref so a new callback identity never re-subscribes presence;
   // the effect below keys only on the room, user and membership.
   const onTimerUpdateRef = useRef(onTimerUpdate);
+  const onNotesUpdateRef = useRef(onNotesUpdate);
   const onSubscribedRef = useRef(onSubscribed);
   useEffect(() => {
     onTimerUpdateRef.current = onTimerUpdate;
+    onNotesUpdateRef.current = onNotesUpdate;
     onSubscribedRef.current = onSubscribed;
-  }, [onTimerUpdate, onSubscribed]);
+  }, [onTimerUpdate, onNotesUpdate, onSubscribed]);
 
   const isMember = room.members.some((member) => member.id === currentUserId);
 
@@ -101,6 +105,12 @@ export default function RoomMembers({
       .on("broadcast", { event: "timer" }, ({ payload }) => {
         if (onTimerUpdateRef.current) {
           onTimerUpdateRef.current(payload);
+        }
+      })
+      // Sent by the server after every successful notes save (Stage 3.2).
+      .on("broadcast", { event: "notes" }, ({ payload }) => {
+        if (onNotesUpdateRef.current) {
+          onNotesUpdateRef.current(payload);
         }
       })
       .subscribe((nextStatus) => {

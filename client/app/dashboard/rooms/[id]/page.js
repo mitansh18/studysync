@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import NotesPad from "@/components/NotesPad";
 import RoomMembers from "@/components/RoomMembers";
 import RoomTimer from "@/components/RoomTimer";
 import { useAuth } from "@/context/AuthContext";
@@ -40,6 +41,27 @@ export default function RoomPage() {
   useEffect(() => {
     currentRoomId.current = roomId;
   }, [roomId]);
+
+  // NotesPad registers its own handlers here; the page only relays. The
+  // notes broadcast and the post-SUBSCRIBED re-sync both go through this
+  // ref, so notes follow the same channel lifecycle as the timer without
+  // the page holding any notes state of its own.
+  const notesHandlers = useRef(null);
+
+  const registerNotesHandlers = useCallback((handlers) => {
+    notesHandlers.current = handlers;
+    return () => {
+      if (notesHandlers.current === handlers) {
+        notesHandlers.current = null;
+      }
+    };
+  }, []);
+
+  const handleNotesBroadcast = useCallback((payload) => {
+    if (notesHandlers.current) {
+      notesHandlers.current.onRemote(payload);
+    }
+  }, []);
 
   // Highest timerVersion applied so far. MongoDB assigns the version in the
   // same write as the state, so anything not newer than this is old news no
@@ -147,6 +169,11 @@ export default function RoomPage() {
   // room, after which every later change arrives as a broadcast. Not
   // polling - it runs only on (re)subscription.
   const syncRoom = useCallback(async () => {
+    // Notes re-read on the same trigger, for the same reason.
+    if (notesHandlers.current) {
+      notesHandlers.current.resync();
+    }
+
     const seen = beginRoomUpdate();
     const result = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}`);
 
@@ -214,10 +241,18 @@ export default function RoomPage() {
             applyRoomUpdate={applyRoomUpdate}
           />
 
+          <NotesPad
+            key={room.id}
+            roomId={room.id}
+            canEdit={room.members.some((member) => member.id === user.id)}
+            registerHandlers={registerNotesHandlers}
+          />
+
           <RoomMembers
             room={room}
             currentUserId={user.id}
             onTimerUpdate={handleTimerBroadcast}
+            onNotesUpdate={handleNotesBroadcast}
             onSubscribed={syncRoom}
           />
         </>

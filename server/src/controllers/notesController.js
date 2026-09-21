@@ -1,5 +1,6 @@
 const Note = require("../models/Note");
 const Room = require("../models/Room");
+const { broadcastNotesUpdate } = require("../services/realtime");
 
 // Same checks as the room controller keeps for its own routes, repeated
 // here rather than shared so the two controllers stay independent files.
@@ -89,6 +90,10 @@ async function putNotes(req, res, next) {
     }
 
     const note = await saveNotes(loaded.room._id, text, req.user._id);
+
+    // Only after the write succeeded, and from what was actually stored.
+    // A failed broadcast is logged inside and never affects the response.
+    await broadcastNotesUpdate(loaded.room._id, note.text, note.version);
 
     return res.status(200).json({ notes: toNotesResponse(note) });
   } catch (error) {

@@ -40,14 +40,17 @@ function roomChannelName(roomId) {
   return `studysync-room-${roomId}`;
 }
 
-// Sends the canonical timer state, with the version MongoDB assigned to it,
-// to everyone subscribed to the room's channel as a "timer" broadcast.
+// Sends one event to everyone subscribed to the room's channel. Timer and
+// notes share the channel and differ only in event name and payload.
 // Resolves true if Supabase accepted the message, false otherwise. Never
 // throws.
-async function broadcastTimerUpdate(roomId, timerState, timerVersion) {
+async function broadcastRoomEvent(roomId, event, payload) {
   if (realtimeConfigError) {
     return false;
   }
+
+  // "Timer broadcast failed ...", "Notes broadcast rejected ..."
+  const label = event.charAt(0).toUpperCase() + event.slice(1);
 
   try {
     const response = await fetch(BROADCAST_URL, {
@@ -60,8 +63,8 @@ async function broadcastTimerUpdate(roomId, timerState, timerVersion) {
         messages: [
           {
             topic: roomChannelName(roomId),
-            event: "timer",
-            payload: { timerState, timerVersion },
+            event,
+            payload,
           },
         ],
       }),
@@ -70,7 +73,7 @@ async function broadcastTimerUpdate(roomId, timerState, timerVersion) {
 
     if (response.status !== 202) {
       console.error(
-        `Timer broadcast rejected for room ${roomId}: HTTP ${response.status}`
+        `${label} broadcast rejected for room ${roomId}: HTTP ${response.status}`
       );
       return false;
     }
@@ -78,9 +81,25 @@ async function broadcastTimerUpdate(roomId, timerState, timerVersion) {
     return true;
   } catch (error) {
     // Network failure or timeout. The message never includes the key.
-    console.error(`Timer broadcast failed for room ${roomId}: ${error.message}`);
+    console.error(`${label} broadcast failed for room ${roomId}: ${error.message}`);
     return false;
   }
 }
 
-module.exports = { broadcastTimerUpdate, realtimeConfigError, roomChannelName };
+// The canonical timer state with the version MongoDB assigned to it.
+function broadcastTimerUpdate(roomId, timerState, timerVersion) {
+  return broadcastRoomEvent(roomId, "timer", { timerState, timerVersion });
+}
+
+// The canonical notes text with the version MongoDB assigned to it.
+function broadcastNotesUpdate(roomId, text, version) {
+  return broadcastRoomEvent(roomId, "notes", { text, version });
+}
+
+module.exports = {
+  broadcastRoomEvent,
+  broadcastTimerUpdate,
+  broadcastNotesUpdate,
+  realtimeConfigError,
+  roomChannelName,
+};

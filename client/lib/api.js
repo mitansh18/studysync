@@ -2,7 +2,9 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
 // credentials:"include" is what lets the browser send and store the
 // httpOnly auth cookie across the :3000 -> :5000 origin boundary.
-export async function apiFetch(path, { method = "GET", body } = {}) {
+// `keepalive` lets a small request outlive the page (used to flush unsaved
+// notes on pagehide); it is off unless a caller asks for it.
+export async function apiFetch(path, { method = "GET", body, keepalive = false } = {}) {
   let response;
 
   try {
@@ -11,6 +13,7 @@ export async function apiFetch(path, { method = "GET", body } = {}) {
       credentials: "include",
       headers: body ? { "Content-Type": "application/json" } : undefined,
       body: body ? JSON.stringify(body) : undefined,
+      keepalive,
     });
   } catch {
     // Unreachable server. Kept distinct from a 401 so callers never mistake
