@@ -1,0 +1,87 @@
+// StudySync SQL stats backbone (Stage 4.1).
+//
+// MongoDB stays authoritative for users, authentication, rooms, the timer
+// and the notes; nothing here participates in a request's auth path. This
+// database exists only so that finished study sessions leave a durable,
+// queryable trail for the dashboard stages (streaks: GROUP BY date,
+// leaderboard: JOIN users + SUM(duration_minutes)).
+//
+// Stage 4.1 creates the schema and nothing else - no row is written by the
+// application yet. Writing sessions is Stage 4.2 and later.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// A mirror of the MongoDB user, kept only so study_sessions can carry a
+// real foreign key and so the leaderboard can JOIN a name. It is not an
+// account: there is deliberately no password, no role and no login path
+// here, and nothing reads this table to authenticate anyone.
+//
+// id is the MongoDB _id as its 24-character hex string, so the two stores
+// share one identity without either one issuing ids for the other.
+//
+// email carries no unique constraint on purpose: MongoDB owns identity and
+// its uniqueness rules, and a mirror must never reject a write that
+// MongoDB has already accepted.
+model User {
+  id    String  @id @db.Char(24)
+  name  String  @db.VarChar(200)
+  email String? @db.VarChar(320)
+
+  // When this mirror row was written/last refreshed - not the account's own
+  // creation date, which lives in MongoDB.
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  studySessions StudySession[]
+
+  @@map("users")
+}
+
+// One row per participant per finished session (written from Stage 4.2 on).
+//
+// Time convention: every timestamp column is timestamptz and every value is
+// stored and read as UTC. Prisma hands JavaScript Date objects to the
+// driver, which are absolute instants, and Postgres keeps timestamptz in
+// UTC internally - so a day bucket for streaks is always
+// date_trunc('day', date AT TIME ZONE 'UTC'), never the server's local day.
+model StudySession {
+  id String @id @default(uuid()) @db.Uuid
+
+  // The participant. A real foreign key into the mirror above; Restrict
+  // rather than Cascade so history can never be deleted as a side effect.
+  userId String @map("user_id") @db.Char(24)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  // The MongoDB room _id as a hex string. Deliberately not a foreign key:
+  // rooms live in MongoDB, and session history must outlive them.
+  roomId String @map("room_id") @db.Char(24)
+
+  // Copied from the room at the time of the session rather than looked up
+  // later, so renaming or deleting a room cannot rewrite history.
+  subject String @db.VarChar(200)
+
+  // Whole minutes actually studied. The rule that produces this number is
+  // Stage 4.2's; a CHECK constraint added in the migration is all this
+  // stage enforces - a duration can be zero but never negative.
+  durationMinutes Int @map("duration_minutes")
+
+  // When the session ended, in UTC. Named `date` because the dashboard
+  // groups by its day.
+  date DateTime @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  // userId alone serves a user's history; (userId, date) serves the streak
+  // calendar; date alone serves a leaderboard window over all users.
+  @@index([userId])
+  @@index([date])
+  @@index([userId, date])
+  @@map("study_sessions")
+}

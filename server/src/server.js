@@ -3,6 +3,7 @@ require("dotenv").config();
 
 const app = require("./app");
 const { connectDB } = require("./config/db");
+const { connectSql } = require("./config/sql");
 
 const PORT = process.env.PORT || 5000;
 
@@ -21,6 +22,16 @@ async function start() {
     // The database is required, so fail loudly instead of serving requests
     // against a database that is not there.
     console.error("MongoDB connection failed:", error.message);
+    process.exit(1);
+  }
+
+  // Same rule for the SQL stats database (Stage 4.1): configured and
+  // reachable, or the server does not start. There is deliberately no
+  // degraded mode - see src/config/sql.js.
+  try {
+    await connectSql();
+  } catch (error) {
+    console.error("PostgreSQL connection failed:", error.message);
     process.exit(1);
   }
 
