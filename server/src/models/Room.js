@@ -113,6 +113,32 @@ const roomSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    // Seconds actually studied in the room's current study segment: the sum
+    // of every stretch the timer really ran, pauses excluded. The timer's own
+    // durationSeconds is a countdown remainder meant for display, and the
+    // expiry branch of pause restores the default length, so study time
+    // cannot be recovered from it reliably - this keeps it. Written in the
+    // same atomic update as the timer transition that produced it (see
+    // roomController) and never taken from a client.
+    studiedSeconds: {
+      type: Number,
+      default: 0,
+      min: 0,
+      validate: {
+        validator: Number.isInteger,
+        message: "studiedSeconds must be a whole number of seconds",
+      },
+    },
+    // Which study segment the room is on. Reset means "start over", so it
+    // ends the current segment and begins the next one. (room, segment) is
+    // the identity a finished segment is recorded under, which is what makes
+    // recording the same segment twice a no-op while a later segment still
+    // records as its own history.
+    sessionSegment: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
   // Supplies createdAt (and updatedAt), matching the User model.
   { timestamps: true }

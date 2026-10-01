@@ -63,6 +63,12 @@ model StudySession {
   // rooms live in MongoDB, and session history must outlive them.
   roomId String @map("room_id") @db.Char(24)
 
+  // Which study segment of that room this row belongs to (Room.sessionSegment
+  // in MongoDB, bumped by a timer reset). Together with room and user it is
+  // the identity of one participant's record of one finished segment - see the
+  // unique constraint below.
+  segment Int
+
   // Copied from the room at the time of the session rather than looked up
   // later, so renaming or deleting a room cannot rewrite history.
   subject String @db.VarChar(200)
@@ -78,6 +84,11 @@ model StudySession {
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
+  // Recording one finished segment must stay a no-op however many times it is
+  // attempted, including from two callers at once, so the database itself
+  // refuses a second row for the same participant and segment. This is the
+  // final guard: the service relies on it rather than on checking first.
+  @@unique([roomId, segment, userId], map: "study_sessions_room_segment_user_key")
   // userId alone serves a user's history; (userId, date) serves the streak
   // calendar; date alone serves a leaderboard window over all users.
   @@index([userId])

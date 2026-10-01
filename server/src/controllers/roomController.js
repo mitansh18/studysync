@@ -172,7 +172,12 @@ async function loadRoomForMember(id, userId) {
 // Applies `nextTimerState` only if the room's timer still matches
 // `expectedTimer` (a partial of timerState fields). `members` is part of the
 // filter as well, so the write itself cannot land for a non-member.
-function swapTimerState(roomId, userId, expectedTimer, nextTimerState) {
+//
+// `extra` carries the study-time accounting that belongs to the very same
+// transition ({ set, inc }, Stage 4.2). It rides in this one update rather
+// than a second write, so the timer state and what it says about study time
+// can never disagree, and the compare-and-swap protects both.
+function swapTimerState(roomId, userId, expectedTimer, nextTimerState, extra = {}) {
   const filter = { _id: roomId, members: userId };
   for (const [field, value] of Object.entries(expectedTimer)) {
     filter[`timerState.${field}`] = value;
@@ -182,7 +187,10 @@ function swapTimerState(roomId, userId, expectedTimer, nextTimerState) {
   // so there is never a moment where one has happened without the other.
   return Room.findOneAndUpdate(
     filter,
-    { $set: { timerState: nextTimerState }, $inc: { timerVersion: 1 } },
+    {
+      $set: { timerState: nextTimerState, ...extra.set },
+      $inc: { timerVersion: 1, ...extra.inc },
+    },
     { returnDocument: "after", runValidators: true }
   ).populate("members", "name");
 }
@@ -287,13 +295,23 @@ async function pauseTimer(req, res, next) {
         ? { status: "paused", startedAt: null, durationSeconds: remainingSeconds }
         : { ...DEFAULT_TIMER_STATE };
 
+    // Study-time accounting (Stage 4.2): the stretch that just ended is added
+    // to the room's total for this segment. It can never count for more than
+    // the stretch was given, which is what stops a timer left running for
+    // hours - or a clock jump - from inventing study time. Note the expired
+    // case accumulates too: the timer is shown as idle again, but the full
+    // stretch was studied, and that is what later gets recorded.
+    const studiedSeconds =
+      loaded.room.studiedSeconds + Math.min(elapsedSeconds, durationSeconds);
+
     // startedAt in the filter distinguishes this running segment from one
     // that a concurrent reset+start could have produced in the meantime.
     const room = await swapTimerState(
       loaded.room._id,
       req.user._id,
       { status: "running", startedAt },
-      nextTimerState
+      nextTimerState,
+      { set: { studiedSeconds } }
     );
 
     if (!room) {
@@ -320,11 +338,16 @@ async function resetTimer(req, res, next) {
       return res.status(loaded.status).json({ message: loaded.message });
     }
 
+    // Reset means "start over", so the study time accumulated so far stops
+    // belonging to anything that can still be recorded, and the room moves on
+    // to its next study segment (Stage 4.2). Visible timer behaviour is
+    // unchanged - these two fields are internal.
     const room = await swapTimerState(
       loaded.room._id,
       req.user._id,
       {},
-      { ...DEFAULT_TIMER_STATE }
+      { ...DEFAULT_TIMER_STATE },
+      { set: { studiedSeconds: 0 }, inc: { sessionSegment: 1 } }
     );
 
     if (!room) {
