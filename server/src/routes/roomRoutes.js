@@ -7,6 +7,7 @@ const {
   startTimer,
   pauseTimer,
   resetTimer,
+  endSession,
 } = require("../controllers/roomController");
 const { getNotes, putNotes } = require("../controllers/notesController");
 const requireAuth = require("../middleware/authMiddleware");
@@ -21,6 +22,10 @@ router.get("/:id", requireAuth, getRoom);
 router.post("/:id/timer/start", requireAuth, startTimer);
 router.post("/:id/timer/pause", requireAuth, pauseTimer);
 router.post("/:id/timer/reset", requireAuth, resetTimer);
+
+// Ends the room's study session: records it to SQL, then marks the room
+// ended. Members only; no request body is read (Stage 4.3).
+router.post("/:id/end", requireAuth, endSession);
 
 // Shared notes. Members only, for reading as well as writing.
 router.get("/:id/notes", requireAuth, getNotes);

@@ -1,5 +1,9 @@
 const Room = require("../models/Room");
 const { broadcastTimerUpdate } = require("../services/realtime");
+const {
+  recordStudySession,
+  SessionRecordingError,
+} = require("../services/sessionRecording");
 
 // Mongoose's isValid() also accepts any 12-character string, which would let
 // "abcdefghijkl" through as an id. A 24-char hex check is what actually
@@ -104,14 +108,24 @@ async function joinRoom(req, res, next) {
     // $addToSet is atomic, so concurrent joins cannot produce a duplicate
     // member. It also makes a repeat join a no-op rather than an error.
     // Only `members` is written; every other field is left untouched.
+    //
+    // `status: "active"` is what keeps membership and recorded history in
+    // agreement: joining a room whose session has already been recorded would
+    // leave a member who is not a participant of it.
     const room = await Room.findOneAndUpdate(
-      { _id: id },
+      { _id: id, status: "active" },
       { $addToSet: { members: req.user._id } },
       { new: true }
     ).populate("members", "name");
 
     if (!room) {
-      return res.status(404).json({ message: "Room not found" });
+      // The filter can miss for two different reasons; say which.
+      const existing = await Room.findById(id);
+
+      if (!existing) {
+        return res.status(404).json({ message: "Room not found" });
+      }
+      return res.status(409).json({ message: ENDED_MESSAGE });
     }
 
     return res.status(200).json({
@@ -143,6 +157,12 @@ const DEFAULT_TIMER_STATE = Object.freeze({
   startedAt: null,
   durationSeconds: Room.DEFAULT_TIMER_DURATION_SECONDS,
 });
+
+// An ended room is history: its study time is already recorded in SQL, so
+// letting the timer run again (or the notes change, or someone join) would
+// leave MongoDB saying something the recorded session does not. Reads stay
+// open; writes are refused with this.
+const ENDED_MESSAGE = "This session has ended";
 
 function isMember(room, userId) {
   return room.members.some((member) => member._id.equals(userId));
@@ -178,7 +198,10 @@ async function loadRoomForMember(id, userId) {
 // than a second write, so the timer state and what it says about study time
 // can never disagree, and the compare-and-swap protects both.
 function swapTimerState(roomId, userId, expectedTimer, nextTimerState, extra = {}) {
-  const filter = { _id: roomId, members: userId };
+  // `status: "active"` closes the window between reading a room and writing
+  // it: a session that ends in between makes this write miss rather than
+  // restart a timer on a finished session.
+  const filter = { _id: roomId, members: userId, status: "active" };
   for (const [field, value] of Object.entries(expectedTimer)) {
     filter[`timerState.${field}`] = value;
   }
@@ -216,6 +239,9 @@ async function timerConflict(res, roomId) {
   if (!room) {
     return res.status(404).json({ message: "Room not found" });
   }
+  if (room.status !== "active") {
+    return res.status(409).json({ message: ENDED_MESSAGE });
+  }
 
   return res.status(409).json({
     message:
@@ -223,6 +249,36 @@ async function timerConflict(res, roomId) {
         ? "Timer is already running"
         : "Timer state changed, please try again",
   });
+}
+
+// What a running stretch becomes when it stops, and what it contributed to the
+// room's study time. Pulled out of pauseTimer so ending a session can settle a
+// running timer exactly the way pausing does, rather than keeping a second
+// copy of this arithmetic. Behaviour is unchanged: elapsed is floored and
+// clamped at zero, a stretch with time left becomes `paused` holding the
+// remainder, and one that ran out returns to the idle default.
+function settleRunningTimer(timerState, nowMs = Date.now()) {
+  const { startedAt, durationSeconds } = timerState;
+
+  // Both timestamps are this server's, but a clock stepping backwards (or a
+  // second instance with a skewed clock) could make elapsed negative, which
+  // would grant more time than the segment had. Clamp at zero.
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((nowMs - startedAt.getTime()) / 1000)
+  );
+  const remainingSeconds = durationSeconds - elapsedSeconds;
+
+  return {
+    nextTimerState:
+      remainingSeconds > 0
+        ? { status: "paused", startedAt: null, durationSeconds: remainingSeconds }
+        : { ...DEFAULT_TIMER_STATE },
+    // Never more than the stretch was given: a timer left running for hours,
+    // or a clock jump, must not invent study time.
+    studiedSeconds: Math.min(elapsedSeconds, durationSeconds),
+    expired: remainingSeconds <= 0,
+  };
 }
 
 // idle -> running, paused -> running. The current durationSeconds is kept:
@@ -234,6 +290,10 @@ async function startTimer(req, res, next) {
     const loaded = await loadRoomForMember(req.params.id, req.user._id);
     if (!loaded.room) {
       return res.status(loaded.status).json({ message: loaded.message });
+    }
+
+    if (loaded.room.status !== "active") {
+      return res.status(409).json({ message: ENDED_MESSAGE });
     }
 
     const { status, durationSeconds } = loaded.room.timerState;
@@ -275,6 +335,10 @@ async function pauseTimer(req, res, next) {
       return res.status(loaded.status).json({ message: loaded.message });
     }
 
+    if (loaded.room.status !== "active") {
+      return res.status(409).json({ message: ENDED_MESSAGE });
+    }
+
     const { status, startedAt, durationSeconds } = loaded.room.timerState;
 
     if (status !== "running") {
@@ -284,25 +348,12 @@ async function pauseTimer(req, res, next) {
     // Both timestamps are this server's, but a clock stepping backwards (or
     // a second instance with a skewed clock) could make elapsed negative,
     // which would grant more time than the segment had. Clamp at zero.
-    const elapsedSeconds = Math.max(
-      0,
-      Math.floor((Date.now() - startedAt.getTime()) / 1000)
-    );
-    const remainingSeconds = durationSeconds - elapsedSeconds;
-
-    const nextTimerState =
-      remainingSeconds > 0
-        ? { status: "paused", startedAt: null, durationSeconds: remainingSeconds }
-        : { ...DEFAULT_TIMER_STATE };
-
     // Study-time accounting (Stage 4.2): the stretch that just ended is added
-    // to the room's total for this segment. It can never count for more than
-    // the stretch was given, which is what stops a timer left running for
-    // hours - or a clock jump - from inventing study time. Note the expired
-    // case accumulates too: the timer is shown as idle again, but the full
-    // stretch was studied, and that is what later gets recorded.
-    const studiedSeconds =
-      loaded.room.studiedSeconds + Math.min(elapsedSeconds, durationSeconds);
+    // to the room's total for this segment. The expired case accumulates too -
+    // the timer is shown as idle again, but the full stretch was studied, and
+    // that is what later gets recorded.
+    const settled = settleRunningTimer(loaded.room.timerState);
+    const studiedSeconds = loaded.room.studiedSeconds + settled.studiedSeconds;
 
     // startedAt in the filter distinguishes this running segment from one
     // that a concurrent reset+start could have produced in the meantime.
@@ -310,7 +361,7 @@ async function pauseTimer(req, res, next) {
       loaded.room._id,
       req.user._id,
       { status: "running", startedAt },
-      nextTimerState,
+      settled.nextTimerState,
       { set: { studiedSeconds } }
     );
 
@@ -320,7 +371,7 @@ async function pauseTimer(req, res, next) {
 
     return sendTimerResult(
       res,
-      nextTimerState.status === "paused" ? "Timer paused" : "Timer expired",
+      settled.expired ? "Timer expired" : "Timer paused",
       room
     );
   } catch (error) {
@@ -336,6 +387,10 @@ async function resetTimer(req, res, next) {
     const loaded = await loadRoomForMember(req.params.id, req.user._id);
     if (!loaded.room) {
       return res.status(loaded.status).json({ message: loaded.message });
+    }
+
+    if (loaded.room.status !== "active") {
+      return res.status(409).json({ message: ENDED_MESSAGE });
     }
 
     // Reset means "start over", so the study time accumulated so far stops
@@ -360,6 +415,167 @@ async function resetTimer(req, res, next) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Manual End Session (Stage 4.3)
+//
+// Ending a session is the one operation that spans both databases, and there
+// is no transaction across them, so the order is chosen so that the only way
+// for it to fail is "not ended yet":
+//
+//   freeze a running timer  ->  record the segment in PostgreSQL  ->  only
+//   then let MongoDB say the room has ended, settle the timer and move on to
+//   the next segment, all in one conditional update.
+//
+// If the recording fails, the room stays active and the call can simply be
+// repeated. If the process dies after the recording commits, repeating it is
+// also safe: Stage 4.2 is idempotent per (room, segment, participant), so the
+// retry writes no second row and goes on to finalise.
+// ---------------------------------------------------------------------------
+
+function loadRoomWithMembers(roomId) {
+  return Room.findById(roomId).populate("members", "name");
+}
+
+// The one response shape /end answers with, whichever path produced it.
+function sendEndResult(res, message, room, session) {
+  return res.status(200).json({
+    message,
+    room: toRoomResponse(room),
+    session,
+  });
+}
+
+const ALREADY_ENDED_SESSION = Object.freeze({
+  ended: true,
+  alreadyEnded: true,
+  recorded: false,
+});
+
+async function endSession(req, res, next) {
+  try {
+    const loaded = await loadRoomForMember(req.params.id, req.user._id);
+    if (!loaded.room) {
+      return res.status(loaded.status).json({ message: loaded.message });
+    }
+
+    let room = loaded.room;
+
+    // Already ended. Nothing is recorded here on purpose: the segment that was
+    // ended is already in SQL, and recording again would write the fresh empty
+    // segment the room moved on to. Ending is terminal, so a retry or a second
+    // member pressing the button gets the same answer as the call that won.
+    if (room.status !== "active") {
+      return sendEndResult(
+        res,
+        "Session already ended",
+        await loadRoomWithMembers(room._id),
+        ALREADY_ENDED_SESSION
+      );
+    }
+
+    // 1. Freeze a running timer, exactly as pausing would. This makes the
+    // duration about to be recorded a stored number rather than a reading of
+    // the clock: the same on every retry, and already safe in MongoDB even if
+    // the SQL write below fails. The room is NOT marked ended yet.
+    if (room.timerState.status === "running") {
+      const settled = settleRunningTimer(room.timerState);
+      const frozen = await swapTimerState(
+        room._id,
+        req.user._id,
+        { status: "running", startedAt: room.timerState.startedAt },
+        settled.nextTimerState,
+        { set: { studiedSeconds: room.studiedSeconds + settled.studiedSeconds } }
+      );
+
+      // A concurrent pause or expiry settled it first - the time is accounted
+      // for either way, so continue from whatever MongoDB now holds.
+      room = frozen || (await loadRoomWithMembers(room._id));
+
+      if (!room) {
+        return res.status(404).json({ message: "Room not found" });
+      }
+      if (room.status !== "active") {
+        return sendEndResult(res, "Session already ended", room, ALREADY_ENDED_SESSION);
+      }
+    }
+
+    // 2. PostgreSQL first. Every participant, the subject and the duration come
+    // from MongoDB inside the service; this request body is never read.
+    let recording;
+    try {
+      recording = await recordStudySession(room._id.toString());
+    } catch (error) {
+      if (error instanceof SessionRecordingError) {
+        return res.status(error.status).json({ message: error.message });
+      }
+      // Anything else (including a Prisma failure) goes to the error handler,
+      // which logs it server-side and answers with a generic 500.
+      return next(error);
+    }
+
+    // 3. One conditional update ends the room, settles the timer and starts the
+    // next segment. The filter is what makes concurrency safe: `status` lets
+    // exactly one of two simultaneous enders through, `sessionSegment` refuses
+    // to end a segment other than the one just recorded (a reset in between
+    // moves it on), and the member count refuses to end a room someone joined
+    // after the recording took its snapshot.
+    const finalised = await Room.findOneAndUpdate(
+      {
+        _id: room._id,
+        status: "active",
+        sessionSegment: recording.segment,
+        members: { $size: recording.participantCount },
+      },
+      {
+        $set: {
+          status: "ended",
+          timerState: { ...DEFAULT_TIMER_STATE },
+          studiedSeconds: 0,
+        },
+        $inc: { timerVersion: 1, sessionSegment: 1 },
+      },
+      { returnDocument: "after", runValidators: true }
+    ).populate("members", "name");
+
+    if (!finalised) {
+      const current = await loadRoomWithMembers(room._id);
+
+      if (!current) {
+        return res.status(404).json({ message: "Room not found" });
+      }
+      // Another end request won the race; its answer is this one's answer.
+      if (current.status !== "active") {
+        return sendEndResult(res, "Session already ended", current, ALREADY_ENDED_SESSION);
+      }
+      // A reset moved the segment on, or a member joined, so what was just
+      // recorded is no longer what would be ended. Repeating the request
+      // records the current segment (including any new member - the unique key
+      // is per participant) and then finalises.
+      return res.status(409).json({
+        message: "Room changed while ending the session, please try again",
+      });
+    }
+
+    // The timer state really did change, so the room's channel is told what it
+    // is now through the same "timer" event every timer write already sends -
+    // the canonical idle state a reset sends too. No new event, no new payload.
+    const payload = toRoomResponse(finalised);
+    await broadcastTimerUpdate(payload.id, payload.timerState, payload.timerVersion);
+
+    return sendEndResult(res, "Session ended", finalised, {
+      ended: true,
+      alreadyEnded: false,
+      recorded: true,
+      alreadyRecorded: recording.alreadyRecorded,
+      segment: recording.segment,
+      participantCount: recording.participantCount,
+      durationMinutes: recording.durationMinutes,
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   createRoom,
   getRoom,
@@ -367,4 +583,5 @@ module.exports = {
   startTimer,
   pauseTimer,
   resetTimer,
+  endSession,
 };

@@ -77,6 +77,12 @@ async function putNotes(req, res, next) {
     // Only `text` is read from the body, and only as an actual string:
     // numbers, booleans, arrays, objects and null are refused rather than
     // coerced. roomId comes from the URL and updatedBy from the session.
+    // An ended session is finished history: its notes are what Stage 5 will
+    // summarise, so they stop changing here. Reading them stays open to members.
+    if (loaded.room.status !== "active") {
+      return res.status(409).json({ message: "This session has ended" });
+    }
+
     const body = req.body || {};
     const { text } = body;
 
